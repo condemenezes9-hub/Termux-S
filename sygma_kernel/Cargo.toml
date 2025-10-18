@@ -1,0 +1,11 @@
+[package]
+name = "sygma_kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-bls12-381 = { version = "0.4", default-features = false }
+ark-bn254 = { version = "0.4", default-features = false }
+ark-std = { version = "0.4", features = ["std"] }
+rand = { version = "0.8", default-features = false, features = ["std"] }
+
