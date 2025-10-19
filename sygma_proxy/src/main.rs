@@ -1,16 +1,21 @@
-// sygna_proxy/src/main.rs - Versão com Cache TinyLFU e Health Check
+// sygna_proxy/src/main.rs - Versão com Configuração Externalizada (YAML)
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use moka::sync::Cache;
 use std::time::Duration;
+use serde::Deserialize;
 
 #[macro_use]
 extern crate lazy_static;
 
-// ENDEREÇOS FIXOS DO SISTEMA
-const PROXY_ADDRESS: &str = "127.0.0.1:7878";
-const KERNEL_ADDRESS: &str = "127.0.0.1:8080"; 
+// --- ESTRUTURA DE DADOS DA CONFIGURAÇÃO YAML ---
+// Usamos Serde para mapear o arquivo YAML para esta estrutura Rust
+#[derive(Debug, Deserialize)]
+struct Config {
+    proxy_address: String,
+    kernel_address: String,
+}
 
 // O CACHE GLOBAL: Implementação TinyLFU
 lazy_static! {
@@ -20,36 +25,47 @@ lazy_static! {
         .build();
 }
 
+// Variável global para armazenar a configuração
+lazy_static! {
+    static ref APP_CONFIG: Config = load_config().expect("Falha ao carregar config.yaml. O arquivo existe?");
+}
+
+
+// --- FUNÇÃO DE LEITURA DA CONFIGURAÇÃO ---
+fn load_config() -> Result<Config, io::Error> {
+    let config_path = "config.yaml";
+    let contents = std::fs::read_to_string(config_path)?;
+    
+    // Deserializa o YAML para a nossa estrutura Config
+    let config: Config = serde_yaml::from_str(&contents)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Erro de parse YAML: {}", e)))?;
+    
+    Ok(config)
+}
+
+
 // --- FUNÇÕES CORE DO PROXY ---
 
-// FUNÇÃO NOVA: Verifica se o Kernel (T1) está disponível
+// Verifica se o Kernel (T1) está disponível, usando o endereço LIDO do YAML
 async fn check_kernel_health() -> bool {
-    // Tenta conectar ao endereço do Kernel (porta 8080 simulada)
-    match TcpStream::connect(KERNEL_ADDRESS).await {
-        Ok(_) => {
-            // Conexão bem-sucedida. Kernel está "saudável"
-            true
-        }
-        Err(_) => {
-            // Falha ao conectar. Kernel está inativo/morto.
-            false
-        }
+    // Acessa o endereço do Kernel através do APP_CONFIG
+    match TcpStream::connect(APP_CONFIG.kernel_address.as_str()).await {
+        Ok(_) => true,
+        Err(_) => false,
     }
 }
 
 
 // 1. VERIFICAR AUTENTICAÇÃO (O Zero-Trust Check com Caching)
+// ... (Lógica inalterada)
 async fn verify_zero_trust_token(token: &str) -> bool {
-    // 1.1 TENTAR OBTER DO CACHE (TinyLFU)
     if let Some(is_valid) = TRUST_CACHE.get(token) {
         println!("[PROXY-CACHE]: Token '{}' encontrado no TinyLFU. Verificação ignorada (RÁPIDO).", token);
         return is_valid;
     }
 
-    // 1.2 SE NÃO ESTÁ NO CACHE, EXECUTAR A LÓGICA DE VERIFICAÇÃO LENTA
     let is_valid = token.starts_with("AUTH_SYGMA_VALID_"); 
 
-    // 1.3 ARMAZENAR NO CACHE
     if is_valid {
         TRUST_CACHE.insert(token.to_string(), true);
         println!("[PROXY-CACHE]: Token '{}' verificado e adicionado ao TinyLFU.", token);
@@ -73,22 +89,21 @@ async fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
     let auth_token = parts[0].trim();
     let kernel_payload = parts[1].trim();
 
-    // --- 1. EXECUTAR O ZERO-TRUST CHECK ---
+    // 1. ZERO-TRUST CHECK
     if !verify_zero_trust_token(auth_token).await {
         stream.write_all(b"403 ACCESS DENIED: Zero Trust Violation").await?;
         println!("PROXY: REJEIÇÃO: Token {} falhou no Zero-Trust Check.", auth_token);
         return Ok(());
     }
 
-    // --- 2. EXECUTAR O HEALTH CHECK ANTES DE CONECTAR ---
-    // Apenas roteia se o Zero-Trust for válido E o Kernel estiver saudável.
+    // 2. HEALTH CHECK (usando o endereço do YAML)
     if !check_kernel_health().await {
         stream.write_all(b"503 SERVICE UNAVAILABLE: Kernel T1 Offline").await?;
         println!("PROXY: REJEIÇÃO: Kernel T1 indisponível. Conexão bloqueada para prevenir perda de dados.");
         return Ok(());
     }
 
-    // --- 3. ROTEAMENTO SEGURO (SIMULAÇÃO) ---
+    // 3. ROTEAMENTO SEGURO
     println!("PROXY: Roteando payload para o Kernel (Health Check OK)...");
     
     let kernel_response = format!("200 OK: Payload {} submetido ao Kernel T1. Aguardando Settlement.", kernel_payload);
@@ -102,11 +117,13 @@ async fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
 // ----------------------------------------------------------------------
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    // Garante que o cache e a configuração sejam carregados antes de iniciar o listener
     let _ = TRUST_CACHE.entry_count(); 
-    
-    let listener = TcpListener::bind(PROXY_ADDRESS).await?;
-    // MENSAGEM CHAVE DE INICIALIZAÇÃO ALTERADA AQUI
-    println!("--- Sygma Proxy (Tier 2 Agent) escutando em {} (TinyLFU + Health Check Ativo) ---", PROXY_ADDRESS);
+    let _ = APP_CONFIG.proxy_address.as_str();
+
+    // O endereço de escuta AGORA vem do arquivo de configuração
+    let listener = TcpListener::bind(APP_CONFIG.proxy_address.as_str()).await?;
+    println!("--- Sygma Proxy (Tier 2 Agent) escutando em {} (YAML Config + Health Check Ativo) ---", APP_CONFIG.proxy_address);
 
     loop {
         let (stream, addr) = listener.accept().await?;

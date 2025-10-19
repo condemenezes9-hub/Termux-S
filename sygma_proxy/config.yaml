@@ -1,0 +1,8 @@
+# Configuração de Endereços para o Sygma Proxy (Tier 2)
+
+# Endereço onde o Proxy deve escutar
+proxy_address: "127.0.0.1:7979"
+
+# Endereço do Kernel (Tier 1) para o Health Check e roteamento
+kernel_address: "127.0.0.1:8080"
+
